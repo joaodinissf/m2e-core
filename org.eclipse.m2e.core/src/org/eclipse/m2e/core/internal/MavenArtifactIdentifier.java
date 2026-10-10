@@ -25,10 +25,12 @@ import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -69,21 +71,59 @@ public class MavenArtifactIdentifier {
 
   private static final ILog LOG = Platform.getLog(MavenArtifactIdentifier.class);
 
+  /**
+   * Embedded-metadata results per archive, keyed by path. The archive's size and modification time are stored with
+   * the result, so an archive rewritten in place is scanned again.
+   */
+  private static final Map<Path, ArchiveScan> ARCHIVE_SCANS = new ConcurrentHashMap<>();
+
+  private record ArchiveScan(long size, long lastModified, Set<ArtifactKey> artifacts) {
+  }
+
   public static Collection<ArtifactKey> identify(File classesLocation) {
-    // GAV extracted from pom.properties
     Path location = classesLocation.toPath();
-    Set<ArtifactKey> classesArtifacts = MetaInfMavenScanner.scanForPomProperties(location);
-    if(classesArtifacts.isEmpty()) {
-      // GAV extracted from pom.xml
-      classesArtifacts = MetaInfMavenScanner.scanForPomXml(location);
-      if(classesArtifacts.isEmpty() && isQueryCentral()) {
-        // checksum-based lookup in central. This can be really slow and the chances are low that, 
-        // after we havn't found a pom.xml/.properties embedded into the jar that this exact 
-        // same jar is on Maven-Central (jars on central usually have that).
-        classesArtifacts = identifyCentralSearch(location);
-      }
+    Set<ArtifactKey> classesArtifacts = identifyByEmbeddedMetadata(location);
+    if(classesArtifacts.isEmpty() && isQueryCentral()) {
+      // checksum-based lookup in central. This can be really slow and the chances are low that, 
+      // after we havn't found a pom.xml/.properties embedded into the jar that this exact 
+      // same jar is on Maven-Central (jars on central usually have that).
+      classesArtifacts = identifyCentralSearch(location);
     }
     return classesArtifacts;
+  }
+
+  private static Set<ArtifactKey> identifyByEmbeddedMetadata(Path location) {
+    BasicFileAttributes attributes;
+    try {
+      attributes = Files.readAttributes(location, BasicFileAttributes.class);
+    } catch(IOException ex) {
+      attributes = null;
+    }
+    if(attributes == null || !attributes.isRegularFile()) {
+      // directories are not cached: their modification time does not reflect content changes
+      Set<ArtifactKey> artifacts = MetaInfMavenScanner.scanForPomProperties(location);
+      return artifacts.isEmpty() ? MetaInfMavenScanner.scanForPomXml(location) : artifacts;
+    }
+    Path key = location.toAbsolutePath().normalize();
+    long size = attributes.size();
+    long lastModified = attributes.lastModifiedTime().toMillis();
+    ArchiveScan cached = ARCHIVE_SCANS.get(key);
+    if(cached != null && cached.size() == size && cached.lastModified() == lastModified) {
+      return cached.artifacts();
+    }
+    Set<ArtifactKey> artifacts;
+    try {
+      // GAV extracted from pom.properties, else from pom.xml
+      artifacts = MetaInfMavenScanner.scanArchiveForPomProperties(location);
+      if(artifacts.isEmpty()) {
+        artifacts = MetaInfMavenScanner.scanArchiveForPomXml(location);
+      }
+    } catch(IOException ex) {
+      return Set.of(); // not cached: the archive may be readable next time
+    }
+    artifacts = Collections.unmodifiableSet(artifacts);
+    ARCHIVE_SCANS.put(key, new ArchiveScan(size, lastModified, artifacts));
+    return artifacts;
   }
 
   private static boolean isQueryCentral() {

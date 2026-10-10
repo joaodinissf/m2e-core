@@ -122,14 +122,18 @@ public abstract class MetaInfMavenScanner<T> {
       if(Files.isDirectory(file)) {
         scanFilesystem(file.resolve(META_INF_MAVEN), filename, result);
       } else if(Files.isRegularFile(file)) {
-        try (JarFile jar = new JarFile(file.toFile())) {
-          scanJar(jar, "/" + filename, result);
-        }
+        scanArchive(file, filename, result);
       }
     } catch(IOException e) {
       // fall through
     }
     return result;
+  }
+
+  private void scanArchive(Path file, String filename, List<T> result) throws IOException {
+    try (JarFile jar = new JarFile(file.toFile())) {
+      scanJar(jar, "/" + filename, result);
+    }
   }
 
   private void scanJar(JarFile jar, String filename, List<T> result) {
@@ -181,5 +185,25 @@ public abstract class MetaInfMavenScanner<T> {
 
   public static Set<ArtifactKey> scanForPomXml(Path classesLocation) {
     return new LinkedHashSet<>(XML_SCANNER.scan(classesLocation, POM_XML));
+  }
+
+  /**
+   * Like {@link #scanForPomProperties(Path)} for an archive, but throws if the archive cannot be read instead of
+   * answering "no metadata".
+   */
+  static Set<ArtifactKey> scanArchiveForPomProperties(Path archive) throws IOException {
+    List<ArtifactKey> result = new ArrayList<>();
+    PROERTIES_SCANNER.scanArchive(archive, POM_PROPERTIES, result);
+    return new LinkedHashSet<>(result);
+  }
+
+  /**
+   * Like {@link #scanForPomXml(Path)} for an archive, but throws if the archive cannot be read instead of answering
+   * "no metadata".
+   */
+  static Set<ArtifactKey> scanArchiveForPomXml(Path archive) throws IOException {
+    List<ArtifactKey> result = new ArrayList<>();
+    XML_SCANNER.scanArchive(archive, POM_XML, result);
+    return new LinkedHashSet<>(result);
   }
 }
